@@ -6,6 +6,51 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 import csv
+import chardet  # 需要安裝: pip install chardet
+
+def detect_encoding(data):
+    """
+    自動檢測數據的編碼格式
+    """
+    result = chardet.detect(data)
+    encoding = result['encoding']
+    confidence = result['confidence']
+    
+    # 如果信心度太低，嘗試常見的中文編碼
+    if confidence < 0.8:
+        for enc in ['utf-8', 'gb2312', 'gbk', 'gb18030', 'big5', 'utf-16']:
+            try:
+                data.decode(enc)
+                return enc
+            except:
+                continue
+    
+    return encoding or 'utf-8'
+
+def safe_decode(data, encoding=None):
+    """
+    安全地解碼數據，嘗試多種編碼
+    """
+    if encoding:
+        try:
+            return data.decode(encoding)
+        except:
+            pass
+    
+    # 嘗試自動檢測
+    detected_encoding = detect_encoding(data)
+    try:
+        return data.decode(detected_encoding)
+    except:
+        # 如果檢測失敗，嘗試常見編碼
+        for enc in ['utf-8', 'gb2312', 'gbk', 'gb18030', 'big5', 'utf-16', 'latin-1']:
+            try:
+                return data.decode(enc)
+            except:
+                continue
+        
+        # 最後的手段：使用 errors='replace' 替換無法解碼的字符
+        return data.decode('utf-8', errors='replace')
 
 def export_bitwarden_csv(processed_data, output_csv_path):
     """
@@ -17,11 +62,14 @@ def export_bitwarden_csv(processed_data, output_csv_path):
     ]
     rows = []
 
-    text = processed_data.decode('utf-8', errors='ignore')
+    # 使用更智能的解碼方式
+    text = safe_decode(processed_data)
+    
     lines = text.splitlines()
     in_table = False
     table_headers = []
     row_dict = {}
+    
     for line in lines:
         if line.strip().startswith("TABLE HEADERS:"):
             in_table = True
@@ -58,13 +106,13 @@ def export_bitwarden_csv(processed_data, output_csv_path):
             k, v = line.split(": ", 1)
             row_dict[k.strip()] = v.strip()
 
-    with open(output_csv_path, "w", newline='', encoding="utf-8") as csvfile:
+    # 使用 utf-8-sig 編碼來處理 BOM 問題
+    with open(output_csv_path, "w", newline='', encoding="utf-8-sig") as csvfile:
         writer = csv.writer(csvfile)
         writer.writerow(header)
         writer.writerows(rows)
     
     print(f"Exported {len(rows)} items to Bitwarden CSV.")
-
 
 def decrypt_samsung_pass_file(encrypted_data, password):
     """
@@ -124,7 +172,6 @@ def decrypt_samsung_pass_file(encrypted_data, password):
     
     return decrypted_data[:-padding_length]
 
-
 def decrypt_file(file_path, password):
     """
     Decrypt a Samsung Pass export file.
@@ -153,7 +200,6 @@ def decrypt_file(file_path, password):
         traceback.print_exc()
         return None
 
-
 def is_likely_base64(data):
     """Check if data looks like it's base64 encoded."""
     try:
@@ -168,25 +214,22 @@ def is_likely_base64(data):
     except:
         return False
 
-
 def decode_base64_field(field):
     """Try to decode a base64 encoded field."""
     try:
         if all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" for c in field):
             decoded = base64.b64decode(field)
-            try:
-                return decoded.decode('utf-8')
-            except UnicodeDecodeError:
-                return field
+            # 使用安全解碼
+            return safe_decode(decoded)
         return field
     except Exception:
         return field
 
-
 def process_decrypted_data(data):
     """Process decrypted data to make it more readable."""
     try:
-        text_data = data.decode('utf-8')
+        # 使用安全解碼
+        text_data = safe_decode(data)
         
         lines = text_data.splitlines()
         
@@ -232,16 +275,19 @@ def process_decrypted_data(data):
         return "\n".join(processed_lines).encode('utf-8')
     except Exception as e:
         print(f"Error processing decrypted data: {e}")
+        import traceback
+        traceback.print_exc()
         return data
-    
+
 def spass_file_type(path):
+    """驗證檔案路徑是否為有效的 .spass 檔案"""
     if not os.path.isfile(path):
         raise argparse.ArgumentTypeError(f"File does not exist: {path}")
     if not path.lower().endswith('.spass'):
         raise argparse.ArgumentTypeError("File must have a .spass extension")
     return path
 
-
+# 添加命令列參數來指定編碼
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Decrypt Samsung Pass export and convert to Bitwarden CSV."
@@ -249,6 +295,7 @@ if __name__ == "__main__":
     parser.add_argument("export_file_path", type=spass_file_type, help="Path to Samsung Pass export file")
     parser.add_argument("password", help="Password for decryption")
     parser.add_argument("--all", action="store_true", help="Export all decrypted data")
+    parser.add_argument("--encoding", help="Specify encoding (e.g., utf-8, gbk, big5)")
     args = parser.parse_args()
 
     file_path = args.export_file_path
@@ -258,6 +305,10 @@ if __name__ == "__main__":
     decrypted_data = decrypt_file(file_path, password)
     
     if decrypted_data:
+        # 如果指定了編碼，在 process_decrypted_data 中使用
+        if args.encoding:
+            print(f"Using specified encoding: {args.encoding}")
+            
         processed_data = process_decrypted_data(decrypted_data)
         
         is_text = True
